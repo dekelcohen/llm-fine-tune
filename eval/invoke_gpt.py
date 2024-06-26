@@ -150,32 +150,53 @@ def invoke_tgi(messages, engine="gpt-35-turbo-16k", max_tokens=4000, temperature
         print("All retry attempts failed. Returning None.")
         return None
 
-def apply_gpt_to_row(row, col_name, messages_template, max_input_len, delay_between_reqs, flag_LLM='GPT'):
+
+def apply_gpt_to_row(row, messages_template, max_input_len, delay_between_reqs, flag_LLM='GPT'):  
+    """  
+    Calls LLM for one row of df --> return LLM response (text - not, yet parsed)  
+      
+    Parameters:  
+    - row: A single row of the DataFrame.  
+    - messages_template: List of message templates containing placeholders.  
+        - each placeholder is a column name from df row (ex: <<<!col text1!>>>) to be replaced by the row['col text1'] value
+    - max_input_len: Maximum length of input text for each placeholder value.  
+    - delay_between_reqs: Delay between requests to the LLM.  
+    - flag_LLM: Flag to determine which LLM to use ('GPT' or 'TGI').  
+      
+    Returns:  
+    - response: The response from the LLM.  
+    """  
     messages_copy = []  
-    text = row[col_name]
-    if not isinstance(text, str) or len(text) == 0:
-        return None
-    text = text[:max_input_len]
-    logger.info(f"*** text: {text}")
+      
     for message in messages_template:  
-       message_copy = message.copy()  
-       if "{col_name}" in message_copy["content"]:  
-           
-           
-           message_copy["content"] = message_copy["content"].replace("{col_name}", row[col_name])  
-       messages_copy.append(message_copy)  
-
-    if flag_LLM=='GPT':
-        response = invoke_gpt(messages_copy)
-        time.sleep(delay_between_reqs)
-    if flag_LLM=='TGI':
-        response = invoke_tgi(messages_copy)
-
-    logger.info(f"Processed row index: {row.name}")
+        message_copy = message.copy()  
+          
+        # Find all placeholders in the message content  
+        placeholders = re.findall(r'<<<!(.*?)!>>>', message_copy["content"])  
+          
+        # Replace placeholders with actual column values  
+        for placeholder in placeholders:  
+            if placeholder in row:  
+                value = str(row[placeholder])  
+                if len(value) > max_input_len:  
+                    value = value[:max_input_len]  
+                message_copy["content"] = message_copy["content"].replace(f'<<<!{placeholder}!>>>', value)  
+            else:  
+                raise KeyError(f"Placeholder column '{placeholder}' not found in row with index {row.name}")  
+          
+        messages_copy.append(message_copy)  
+      
+    if flag_LLM == 'GPT':  
+        response = invoke_gpt(messages_copy)  
+        time.sleep(delay_between_reqs)  
+    elif flag_LLM == 'TGI':  
+        response = invoke_tgi(messages_copy)  
+      
+    logger.info(f"Processed row index: {row.name}")  
     return response  
+    
 
-
-def apply_gpt_df(df, col_name, messages_template, max_input_len = 1500, delay_between_reqs = 1, flag_LLM='GPT'):
+def apply_gpt_df(df, messages_template, max_input_len = 1500, delay_between_reqs = 1, flag_LLM='GPT'):
     """
     Apply a GPT prompt to every row in a dataframe with prompt template (messages) with the row[col_name] is the text to be inserted into the template
     Usage Example:
@@ -201,11 +222,11 @@ def apply_gpt_df(df, col_name, messages_template, max_input_len = 1500, delay_be
 
     """
     
-    gpt_output = df.apply(apply_gpt_to_row, axis=1, col_name=col_name, messages_template=messages_template, max_input_len=max_input_len, delay_between_reqs=delay_between_reqs,flag_LLM=flag_LLM)
+    gpt_output = df.apply(apply_gpt_to_row, axis=1, messages_template=messages_template, max_input_len=max_input_len, delay_between_reqs=delay_between_reqs,flag_LLM=flag_LLM)
     return gpt_output
 
 
-def apply_gpt_data_splits(data_splits_folder_path='./temp/data_splits', output_folder_path='./temp/data_splits_output', messages_template = None, col_name='text.en', max_input_len=700 ,flag_LLM='GPT'):
+def apply_gpt_data_splits(data_splits_folder_path='./temp/data_splits', output_folder_path='./temp/data_splits_output', messages_template = None, max_input_len=700 ,flag_LLM='GPT'):
     """
     reads the parquet files from the data_splits_folder_path, applies the apply_gpt_df function to each DataFrame, 
     and saves the result in a separate folder with the same name and _output suffix:
@@ -219,7 +240,7 @@ def apply_gpt_data_splits(data_splits_folder_path='./temp/data_splits', output_f
           
         if not output_file.exists():  
             test_df = pd.read_parquet(input_file)  
-            test_df['gpt_out'] = apply_gpt_df(test_df, col_name, messages_template=messages_template, max_input_len=max_input_len, flag_LLM=flag_LLM)
+            test_df['gpt_out'] = apply_gpt_df(test_df, messages_template=messages_template, max_input_len=max_input_len, flag_LLM=flag_LLM)
             test_df.to_parquet(output_file, engine='pyarrow')  
             logger.info(f"Processed and saved {output_file}")  
         else:  
