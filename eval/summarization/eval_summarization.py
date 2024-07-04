@@ -1,4 +1,7 @@
-# Add to PYTHONPATH D:\NLP\llm-fine-tune\eval - for from helpers.invoke_gpt
+# cd /d D:\NLP\llm-fine-tune\eval
+
+# TODO:HIGH: chunks: 'max_tokens' - depends on the summary length (or we can split it)
+
 import os  
 import pandas as pd  
 import json  
@@ -6,8 +9,18 @@ from pathlib import Path
 from loguru import logger  
 from helpers.invoke_gpt import save_split_df_chunks, apply_gpt_data_splits  
 from eng_utils.common.common_util import read_df_folder  
-  
-def main(df, prompt_template, data_splits_folder_path='./temp/data_splits', output_folder_path='./temp/data_splits_output', max_input_len=700, flag_LLM='GPT'):  
+
+LLM_JUDGE_PROMPT = """
+Task: You act as an LLM Judge:
+
+Does the LLM Response expresses important and accurate facts from the prompt ?
+For each sentence, fact or claim stated in the Response (called Unit), throughly check if it was correctly taken from the input Text.
+Output Format: 
+1) Top Level Json with key "response_factuality" : Array of Unit Json objects
+2) For each Unit a Json: { "Response Unit" : "<response fact/claim/sentence>", "Text" : "<Supporting text from source doc>", "Evaluation" : "<Explanation of why the Response Unit is correct, almost all correct, partially correct or incorrect>" "Score" : "-1:incorrect|0: partially-correct|1:mostly correct|2:correct", "Aspect" : "<The relevant aspect from the prompt, if exist>" } 
+"""  
+
+def main(df, prompt_template, llm_params, data_splits_folder_path='./temp/data_splits', output_folder_path='./temp/data_splits_output'):  
     """  
     Main function to evaluate summarization using GPT.  
       
@@ -32,7 +45,7 @@ def main(df, prompt_template, data_splits_folder_path='./temp/data_splits', outp
     ]  
       
     # Apply GPT to data splits  
-    apply_gpt_data_splits(data_splits_folder_path=data_splits_folder_path, output_folder_path=output_folder_path, messages_template=messages_template, max_input_len=max_input_len, flag_LLM=flag_LLM)  
+    apply_gpt_data_splits(messages_template=messages_template, llm_params=llm_params, data_splits_folder_path=data_splits_folder_path, output_folder_path=output_folder_path)
       
     # Read the resulting folder of splits into a new DataFrame  
     df_out = read_df_folder(output_folder_path)  
@@ -47,27 +60,38 @@ def main(df, prompt_template, data_splits_folder_path='./temp/data_splits', outp
       
     df_out['gpt_out_json'] = df_out['gpt_out'].apply(parse_json_safe)  
       
-    # Save the output DataFrame  
-    output_file = os.path.join(output_folder_path, 'evaluation_results.parquet')  
-    df_out.to_parquet(output_file, engine='pyarrow')  
+    # Save the eval results output DataFrame  
+    output_dir = Path('eval_results')
+    # Create the directory if it doesn't exist
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / 'evaluation_results.parquet'
+    df_out.to_parquet(output_file)  
     logger.info(f"Evaluation results saved to {output_file}")  
+    return df_out
   
 if __name__ == "__main__":  
-    # Read the input DataFrame from a Parquet file  
-    input_parquet_file = './data/inputs/summarization_input.parquet'  
-    df = pd.read_parquet(input_parquet_file)  
+    # Read the input containing prompts and responses
+    prompts_responses_file = './summarization/test/summarization_input.parquet'  
+    df = pd.read_parquet(prompts_responses_file)  
       
-    # Define the prompt template  
-    prompt_template = """  
+    # Define the prompt template for LLM response verification
+    prompt_template = f"""  
     <<<!inputs!>>>  
-    <<<!llm_resp_inputs!>>>  
-    Task: You act as an LLM Judge:  
-    Does the Summary expresses important and accurate facts from the prompt?  
-    For each sentence, fact or claim stated in the Summary (Summary Unit), thoroughly check if it was correctly taken from the Text to Summarize.  
-    Output Format:  
-    1) Top Level Json with key "summary_factuality" : Array of Summary Unit Json objects  
-    2) For each Summary Unit a Json: { "Summary" : "<summary fact/claim/sentence>", "Text" : "<Supporting text from source doc>", "Evaluation" : "<Explanation of why the Summary Unit is correct, almost all correct, partially correct or incorrect>" "Score" : "-1:incorrect|0: partially-correct|1:mostly correct|2:correct", "Aspect" : "<The relevant aspect from the prompt, if exist>" }  
+    <<<!llm_resp_inputs!>>> 
+    {LLM_JUDGE_PROMPT}
     """  
       
-    # Call the main function  
-    main(df=df, prompt_template=prompt_template)  
+    # Call the main function
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") # model deployment name as created in AzureOpenAI Studio | Deployments (gpt-3.5, my-gpt-4, gpt-4o ...)
+    llm_params = {
+        'model_type' : 'GPT', # TGI
+        'model' : deployment_name,
+        'delay_between_reqs' : 1,
+        'max_input_len' : 1000000, # TODO: Chunks - currently do not truncate input len
+        'generation' : {
+            'max_tokens' : 2500, # TODO: 'max_tokens' - depends on the summary length (or we can split it)
+            'temperature' : 0.0,
+        }
+    }
+    df_out = main(df=df, prompt_template=prompt_template, llm_params=llm_params)  
+    df_out['gpt_out_json'].iloc[0]

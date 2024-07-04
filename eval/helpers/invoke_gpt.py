@@ -16,7 +16,6 @@ azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT") # 'https://<ours-open-ai-res
 api_version = os.getenv("AZURE_OPENAI_API_VERSION") # "2023-07-01-preview"
 api_key = os.getenv("AZURE_OPENAI_API_KEY")
 
-deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") # model deployment name as created in AzureOpenAI Studio | Deployments (gpt-3.5, my-gpt-4, gpt-4o ...)
 
 client = AzureOpenAI(azure_endpoint=azure_endpoint,
 api_version=api_version,
@@ -40,15 +39,15 @@ def save_split_df_chunks(test_df, chunk_size=300, folder_path='./temp/data_split
         chunk_df = test_df[i * chunk_size:(i + 1) * chunk_size]  
         chunk_df.to_parquet(folder / f'data_split_{i}.parquet')  
 
-def internal_invoke_gpt(messages, model, max_tokens, temperature):
+def internal_invoke_gpt(messages, llm_params):
     """
     Internal func - called by retry-wrapper invoke_gpt below
     """            
     try:
-        response = client.chat.completions.create(model=model,
+        response = client.chat.completions.create(model=llm_params['model'],
         messages = messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
+        temperature=llm_params['generation']['temperature'],
+        max_tokens=llm_params['generation']['max_tokens'],
         top_p=0.95,
         frequency_penalty=0,
         presence_penalty=0,
@@ -63,7 +62,7 @@ def internal_invoke_gpt(messages, model, max_tokens, temperature):
         print(f"Exception occurred: {e}")                
         return None  # Return None to indicate that the call should be retried
 
-def invoke_gpt(messages, model="gpt-35-turbo-16k", max_tokens=4000, temperature=0.3):
+def invoke_gpt(messages, llm_params):
     """
     Call GPT api up to three times. If a RateLimitError is encountered, it will sleep for the 
     specified duration and then retry. If all three attempts fail, the function will return None.
@@ -86,9 +85,9 @@ def invoke_gpt(messages, model="gpt-35-turbo-16k", max_tokens=4000, temperature=
     -------
     response : string of gpt response, or None if failed
 
-    """
+    """   
     for retry_attempt in range(3):  
-        response = internal_invoke_gpt(messages, model, max_tokens, temperature)  
+        response = internal_invoke_gpt(messages, llm_params)  
 
         if not isinstance(response, RateLimitError):  
             return response
@@ -151,7 +150,7 @@ def invoke_tgi(messages, engine="gpt-35-turbo-16k", max_tokens=4000, temperature
         return None
 
 
-def apply_gpt_to_row(row, messages_template, max_input_len, delay_between_reqs, flag_LLM='GPT'):  
+def apply_gpt_to_row(row, messages_template, llm_params):  
     """  
     Calls LLM for one row of df --> return LLM response (text - not, yet parsed)  
       
@@ -178,25 +177,25 @@ def apply_gpt_to_row(row, messages_template, max_input_len, delay_between_reqs, 
         for placeholder in placeholders:  
             if placeholder in row:  
                 value = str(row[placeholder])  
-                if len(value) > max_input_len:  
-                    value = value[:max_input_len]  
+                if len(value) > llm_params['max_input_len']:
+                    value = value[:llm_params['max_input_len']]  
                 message_copy["content"] = message_copy["content"].replace(f'<<<!{placeholder}!>>>', value)  
             else:  
                 raise KeyError(f"Placeholder column '{placeholder}' not found in row with index {row.name}")  
           
         messages_copy.append(message_copy)  
       
-    if flag_LLM == 'GPT':  
-        response = invoke_gpt(messages_copy)  
-        time.sleep(delay_between_reqs)  
-    elif flag_LLM == 'TGI':  
+    if llm_params['model_type'] == 'GPT':  
+        response = invoke_gpt(messages_copy, llm_params)  
+        time.sleep(llm_params['delay_between_reqs'])  
+    elif llm_params['model_type'] == 'TGI':  
         response = invoke_tgi(messages_copy)  
       
     logger.info(f"Processed row index: {row.name}")  
     return response  
     
 
-def apply_gpt_df(df, messages_template, max_input_len = 1500, delay_between_reqs = 1, flag_LLM='GPT'):
+def apply_gpt_df(df, messages_template, llm_params):
     """
     Apply a GPT prompt to every row in a dataframe with prompt template (messages) with the row[col_name] is the text to be inserted into the template
     Usage Example:
@@ -220,13 +219,12 @@ def apply_gpt_df(df, messages_template, max_input_len = 1500, delay_between_reqs
     -------
     gpt output - pd.Series of strs with GPT response
 
-    """
-    
-    gpt_output = df.apply(apply_gpt_to_row, axis=1, messages_template=messages_template, max_input_len=max_input_len, delay_between_reqs=delay_between_reqs,flag_LLM=flag_LLM)
+    """    
+    gpt_output = df.apply(apply_gpt_to_row, axis=1, messages_template=messages_template, llm_params=llm_params)
     return gpt_output
 
 
-def apply_gpt_data_splits(data_splits_folder_path='./temp/data_splits', output_folder_path='./temp/data_splits_output', messages_template = None, max_input_len=700 ,flag_LLM='GPT'):
+def apply_gpt_data_splits(messages_template, llm_params, data_splits_folder_path='./temp/data_splits', output_folder_path='./temp/data_splits_output'):
     """
     reads the parquet files from the data_splits_folder_path, applies the apply_gpt_df function to each DataFrame, 
     and saves the result in a separate folder with the same name and _output suffix:
@@ -240,7 +238,7 @@ def apply_gpt_data_splits(data_splits_folder_path='./temp/data_splits', output_f
           
         if not output_file.exists():  
             test_df = pd.read_parquet(input_file)  
-            test_df['gpt_out'] = apply_gpt_df(test_df, messages_template=messages_template, max_input_len=max_input_len, flag_LLM=flag_LLM)
+            test_df['gpt_out'] = apply_gpt_df(test_df, messages_template=messages_template, llm_params=llm_params)
             test_df.to_parquet(output_file, engine='pyarrow')  
             logger.info(f"Processed and saved {output_file}")  
         else:  
