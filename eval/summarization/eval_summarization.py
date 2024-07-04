@@ -1,6 +1,7 @@
 # cd /d D:\NLP\llm-fine-tune\eval
 
-# TODO:HIGH: code to parse the verification json and add 
+# TODO: Predictions with old + new finetuned unsloth on fa summary - eval both and analyze improvements 
+
 # TODO:HIGH: chunks: 'max_tokens' - depends on the summary length (or we can split it)
   # TODO: Chunk both input doc text (that can be too long for 8K models) + response units (5 at a time)
   # TODO: large chunks with overlap - so model can see 
