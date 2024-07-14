@@ -2,13 +2,17 @@
 """My Llama-3 8b Instruct Unsloth 2x faster finetuning.ipynb"""
 
 FINETUNE_BASE_MODEL_NAME_PATH = "unsloth/llama-3-8b-Instruct-bnb-4bit"
-LORA_MODEL_NAME = "llama-3-8b-Instruct-bnb-4bit-persian-instruct-1"
+LORA_MODEL_NAME_PATH = "llama-3-8b-Instruct-bnb-4bit-persian-instruct-1"
 DO_INFERENCE = False
+MAX_TEST_SAMPLES = 400 # Select first 400 test samples for inference out of ~11000 in testset
+MAX_NEW_TOKENS = 256 # Max inference generation len
 DO_TRAIN = True
 
+from loguru import logger
 from unsloth import FastLanguageModel
 import torch
 max_seq_length = 8192 # Choose any! We auto support RoPE Scaling internally!
+
 dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
 load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
 
@@ -85,7 +89,7 @@ tokenizer = get_chat_template(
     #mapping = {"role" : "from", "content" : "value", "user" : "human", "assistant" : "gpt"}, # ShareGPT style
 )
 
-def formatting_prompts_func(examples):
+def format_train_prompts_func(examples):
     texts = []
     for inputs,targets in zip(examples['inputs'],examples['targets']):
       #breakpoint()
@@ -98,8 +102,7 @@ def formatting_prompts_func(examples):
 
 
 #from datasets import load_dataset
-#dataset = load_dataset("philschmid/guanaco-sharegpt-style", split = "train")
-dataset = mydataset['train'].map(formatting_prompts_func, batched = True)
+dataset = mydataset['train'].map(format_train_prompts_func, batched = True)
 
 """Let's see how the `Llama-3` format works by printing the 5th element"""
 
@@ -156,7 +159,7 @@ To save the final model as LoRA adapters, either use Huggingface's `push_to_hub`
 **[NOTE]** This ONLY saves the LoRA adapters, and not the full model. To save to 16bit or GGUF, scroll down!
 """
 
-model.save_pretrained(LORA_MODEL_NAME) # Local saving
+model.save_pretrained(LORA_MODEL_NAME_PATH) # Local saving
 # model.push_to_hub("your_name/lora_model", token = "...") # Online saving
 
 #@title Show final memory and time stats
@@ -176,27 +179,38 @@ print(f"Peak reserved memory for training % of max memory = {lora_percentage} %.
 Let's run the model! Since we're using `Llama-3`, use `apply_chat_template` with `add_generation_prompt` set to `True` for inference.
 """
 """Now if you want to load the LoRA adapters we just saved for inference, set `False` to `True`:"""
+def format_inference_prompts_func(examples):
+    lst_messages = []
+    for inputs,targets in zip(examples['inputs'],examples['targets']):
+      #breakpoint()
+      messages = [
+        {"role": "user", "content": inputs},
+      ]
+      lst_messages.append(messages)
+    tensor_inputs = tokenizer.apply_chat_template(
+        lst_messages,
+        tokenize = True,
+        add_generation_prompt = True, # Must add for generation
+        return_tensors = "pt",
+        padding=True
+    ).to("cuda")  
+    return tensor_inputs
+
+
 if DO_INFERENCE:
     from unsloth import FastLanguageModel
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = LORA_MODEL_NAME, # YOUR MODEL YOU USED FOR TRAINING
+        model_name = LORA_MODEL_NAME_PATH, # YOUR MODEL YOU USED FOR TRAINING
         max_seq_length = max_seq_length,
         dtype = dtype,
         load_in_4bit = load_in_4bit,
     )
     FastLanguageModel.for_inference(model) # Enable native 2x faster inference
-
-    messages = [
-        {"from": "human", "value": "What is a famous tall tower in Paris?"},
-    ]
-    inputs = tokenizer.apply_chat_template(
-        messages,
-        tokenize = True,
-        add_generation_prompt = True, # Must add for generation
-        return_tensors = "pt",
-    ).to("cuda")
-
-    outputs = model.generate(input_ids = inputs, max_new_tokens = 64, use_cache = True)
+    
+    dataset_inference = mydataset['test'][:MAX_TEST_SAMPLES]
+    logger.info(f'len(dataset_inference)={len(dataset_inference["inputs"])}')
+    inputs = format_inference_prompts_func(dataset_inference)
+    outputs = model.generate(input_ids = inputs, max_new_tokens = MAX_NEW_TOKENS, use_cache = True)
     tokenizer.batch_decode(outputs)
 
 """You can also use Hugging Face's `AutoModelForPeftCausalLM`. Only use this if you do not have `unsloth` installed. It can be hopelessly slow, since `4bit` model downloading is not supported, and Unsloth's **inference is 2x faster**."""
@@ -209,7 +223,7 @@ if False:
         "lora_model", # YOUR MODEL YOU USED FOR TRAINING
         load_in_4bit = load_in_4bit,
     )
-    tokenizer = AutoTokenizer.from_pretrained("lora_model")
+    tokenizer = AutoTokenizer.from_pretrained(FINETUNE_BASE_MODEL_NAME_PATH)
 
 """### Saving to float16 for VLLM
 
